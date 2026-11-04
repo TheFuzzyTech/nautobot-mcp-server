@@ -1,5 +1,9 @@
-# Obot MCP catalog entry: one shared nautobot-mcp deployment, with each user
-# connecting through their own Nautobot API token.
+# Obot MCP catalog entry, HOSTED variant: Obot runs one shared nautobot-mcp
+# container, and each user connects through their own Nautobot API token.
+# Use nautobot-remote.yaml instead if you run the server yourself.
+#
+# Set `image` to wherever you push deploy/Dockerfile's image; any registry
+# your Obot cluster can pull from works (add a pull secret if it's private).
 #
 # Add this file to the Git repository Obot syncs its MCP catalog from.
 # Obot authenticates users with your identity provider. Each user enters their
@@ -47,7 +51,7 @@ env:
 
 runtime: containerized
 containerizedConfig:
-  image: ghcr.io/YOUR-ORG/nautobot-mcp:0.2.5-peruser1
+  image: registry.example.org/nautobot-mcp:0.2.5-peruser1
   port: 8000
   path: /mcp
   args:

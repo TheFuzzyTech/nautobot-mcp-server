@@ -5,8 +5,10 @@
 # request, so Nautobot enforces that user's permissions and logs changes
 # under their name.
 #
-# Build from the repository root:
-#   docker build -f deploy/Dockerfile -t ghcr.io/YOUR-ORG/nautobot-mcp:0.2.5-peruser1 .
+# Build from the repository root, tagging for whatever registry your
+# platform pulls from (Harbor, Docker Hub, GHCR, a local registry, ...):
+#   docker build -f deploy/Dockerfile -t registry.example.org/nautobot-mcp:0.2.5-peruser1 .
+# No registry at all: deploy/compose.yaml builds and runs it on one host.
 #
 # Tip: pin the base image by digest (and let Renovate/Dependabot bump it).
 FROM python:3.12-slim

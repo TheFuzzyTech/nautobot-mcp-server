@@ -206,8 +206,14 @@ The header is treated as "the token to call Nautobot with", never as proof of
 identity: Nautobot validates it. Keep the server reachable only from the
 gateway anyway (for example with a Kubernetes NetworkPolicy).
 
-`deploy/Dockerfile` builds an image preconfigured for this mode, and
-`deploy/obot/nautobot.yaml` is a matching Obot catalog entry.
+Deployment files in `deploy/`:
+
+| File | Use it when |
+| --- | --- |
+| `Dockerfile` | Building an image preconfigured for this mode; push it to any registry. |
+| `compose.yaml` | Running the server yourself on one Docker host; builds locally, no registry. |
+| `obot/nautobot-remote.yaml` | Obot connects to a server you run (e.g. via `compose.yaml`). |
+| `obot/nautobot-hosted.yaml` | Obot runs the container itself from your registry. |
 
 ## Read-only by default
 

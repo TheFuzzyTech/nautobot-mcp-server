@@ -1,0 +1,40 @@
+# Obot MCP catalog entry, REMOTE variant: you run nautobot-mcp yourself
+# (deploy/compose.yaml, Kubernetes, a VM, ...) and Obot only connects to it.
+# No container registry and no Obot-hosted workloads are needed.
+#
+# Each user enters their personal Nautobot token once when they connect; Obot
+# sends it in the X-Nautobot-Token header on that user's requests only. For
+# remote entries "singleUser" means per-user connection settings; nothing is
+# deployed per user.
+#
+# The server speaks plain HTTP, so put TLS in front of it (reverse proxy) and
+# only allow Obot to reach it: tokens travel on this hop.
+name: Nautobot
+entryKey: nautobot
+serverUserType: singleUser
+shortDescription: Query and manage Nautobot as yourself, with your own Nautobot API token
+description: |
+  Read and (where your Nautobot permissions allow) change devices, locations,
+  IPAM, circuits, VMs and jobs in Nautobot.
+
+  Every request runs as **you**: Nautobot applies your object permissions and
+  records changes in the changelog under your name.
+
+  ## What you'll need to connect
+
+  - **Nautobot API token**: create one in Nautobot under your user profile,
+    then *API Tokens*. Leave *Write enabled* off unless you need to make
+    changes, and set an expiry date.
+metadata:
+  categories: Networking
+repoURL: https://github.com/bsmeding/nautobot-mcp-server
+
+runtime: remote
+remoteConfig:
+  fixedURL: https://nautobot-mcp.example.org/mcp
+  headers:
+    - name: Nautobot API token
+      description: Your personal token from Nautobot (profile, then API Tokens)
+      key: X-Nautobot-Token
+      required: true
+      sensitive: true

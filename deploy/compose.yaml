@@ -1,0 +1,26 @@
+# Run nautobot-mcp on any Docker host, built locally from this repository,
+# so no container registry is involved. Pair with deploy/obot/nautobot-remote.yaml.
+#
+#   NAUTOBOT_URL=https://nautobot.example.org docker compose -f deploy/compose.yaml up -d --build
+#
+# The port is bound to localhost: put a TLS reverse proxy (Caddy, nginx,
+# Traefik, ...) on this host in front of it, reachable only by your gateway.
+services:
+  nautobot-mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: nautobot-mcp:local
+    restart: unless-stopped
+    environment:
+      NAUTOBOT_URL: ${NAUTOBOT_URL:?set NAUTOBOT_URL to your Nautobot base URL}
+      NAUTOBOT_MCP_ALLOW_WRITES: ${NAUTOBOT_MCP_ALLOW_WRITES:-false}
+    ports:
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
