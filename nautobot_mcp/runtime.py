@@ -3,10 +3,18 @@
 The MCP tool functions need access to a shared :class:`NautobotClient`
 instance. We hold it here so tool modules can grab it lazily without
 creating import cycles with the server module.
+
+In per-request token mode (``auth_mode="header"``) the shared client holds
+no credential. The caller's token is bound to the current tool call with a
+:class:`~contextvars.ContextVar`, and :func:`get_client` hands each call a
+client that authenticates as that caller.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,6 +25,7 @@ if TYPE_CHECKING:
 _client: NautobotClient | None = None
 _settings: NautobotMcpSettings | None = None
 _enabled_plugins: tuple[str, ...] = ()
+_request_token: ContextVar[str | None] = ContextVar("nautobot_request_token", default=None)
 
 
 def set_client(client: NautobotClient) -> None:
@@ -26,13 +35,38 @@ def set_client(client: NautobotClient) -> None:
 
 
 def get_client() -> NautobotClient:
-    """Return the active client or raise if not initialized."""
+    """Return the client to use for the current tool call.
+
+    In static mode this is the shared client. In per-request token mode it
+    is a client authenticated as the caller; there is deliberately no
+    fallback, so a request without a token fails instead of running under
+    someone else's identity.
+    """
     if _client is None:
         raise RuntimeError(
             "NautobotClient is not initialized. The MCP server must be "
             "started via nautobot_mcp.server.main()."
         )
-    return _client
+    if _settings is None or not _settings.per_request_token:
+        return _client
+
+    token = _request_token.get()
+    if token is None:
+        raise PermissionError(
+            "This request has no Nautobot API token. The MCP gateway must send "
+            f"the caller's personal token in the {_settings.token_header} header."
+        )
+    return _client.for_token(token)
+
+
+@contextmanager
+def bind_request_token(token: str | None) -> Iterator[None]:
+    """Make ``token`` the caller's Nautobot token for the enclosed tool call."""
+    reset_token = _request_token.set(token)
+    try:
+        yield
+    finally:
+        _request_token.reset(reset_token)
 
 
 def set_settings(settings: NautobotMcpSettings) -> None:

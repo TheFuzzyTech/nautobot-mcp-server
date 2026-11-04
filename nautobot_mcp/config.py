@@ -14,6 +14,7 @@ Resolution order (highest priority first):
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,6 +31,17 @@ _ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "NAUTOBOT_MCP_TENANT_GROUP_SCOPE": ("NAUTOBOT_TENANT_GROUP_SCOPE",),
     "NAUTOBOT_MCP_LOG_LEVEL": ("MCP_LOG_LEVEL",),
 }
+
+# How the server authenticates to Nautobot:
+#   "static" - one shared token from NAUTOBOT_TOKEN / PLUGINS_CONFIG (default).
+#   "header" - each MCP request carries the caller's own Nautobot token in an
+#              HTTP header (set by a gateway such as Obot), so Nautobot sees
+#              and audits the real user. HTTP transports only.
+AUTH_MODE_STATIC = "static"
+AUTH_MODE_HEADER = "header"
+_AUTH_MODES = frozenset({AUTH_MODE_STATIC, AUTH_MODE_HEADER})
+DEFAULT_TOKEN_HEADER = "X-Nautobot-Token"
+_HEADER_NAME_RE = re.compile(r"[A-Za-z0-9-]+")
 
 
 def _getenv(name: str) -> str | None:
@@ -98,19 +110,30 @@ class NautobotMcpSettings:
     tenant_scope: tuple[str, ...] = ()
     tenant_group_scope: tuple[str, ...] = ()
     plugins: tuple[str, ...] = ("auto",)
+    auth_mode: str = AUTH_MODE_STATIC
+    token_header: str = DEFAULT_TOKEN_HEADER
 
     @property
     def tenant_scoped(self) -> bool:
         """True when any tenant or tenant-group restriction is configured."""
         return bool(self.tenant_scope or self.tenant_group_scope)
 
+    @property
+    def per_request_token(self) -> bool:
+        """True when each request must supply its own Nautobot token."""
+        return self.auth_mode == AUTH_MODE_HEADER
+
     def redacted(self) -> dict[str, Any]:
         """Return a dict suitable for logging (token masked)."""
-        token_preview = (
-            f"{self.token[:4]}…{self.token[-4:]}" if len(self.token) >= 8 else "<set>"
-        )
+        if self.per_request_token:
+            token_preview = f"<per-request via {self.token_header}>"
+        elif len(self.token) >= 8:
+            token_preview = f"{self.token[:4]}…{self.token[-4:]}"
+        else:
+            token_preview = "<set>"
         return {
             "url": self.url,
+            "auth_mode": self.auth_mode,
             "token": token_preview,
             "verify_ssl": self.verify_ssl,
             "request_timeout": self.request_timeout,
@@ -183,17 +206,19 @@ def load_settings(**overrides: Any) -> NautobotMcpSettings:
     plugins = _coerce_str_tuple(
         _pick("plugins", "NAUTOBOT_MCP_PLUGINS", default="auto")
     ) or ("auto",)
+    auth_mode = str(
+        _pick("auth_mode", "NAUTOBOT_MCP_AUTH_MODE", default=AUTH_MODE_STATIC)
+    ).strip().lower()
+    token_header = str(
+        _pick("token_header", "NAUTOBOT_MCP_TOKEN_HEADER", default=DEFAULT_TOKEN_HEADER)
+    ).strip()
 
     if not url:
         raise ValueError(
             "Nautobot URL is not configured. Set the NAUTOBOT_URL env var "
             "or PLUGINS_CONFIG['nautobot_mcp']['nautobot_url']."
         )
-    if not token:
-        raise ValueError(
-            "Nautobot API token is not configured. Set the NAUTOBOT_TOKEN env "
-            "var or PLUGINS_CONFIG['nautobot_mcp']['nautobot_token']."
-        )
+    _validate_auth(auth_mode, token, token_header)
 
     return NautobotMcpSettings(
         url=url,
@@ -206,7 +231,45 @@ def load_settings(**overrides: Any) -> NautobotMcpSettings:
         tenant_scope=tenant_scope,
         tenant_group_scope=tenant_group_scope,
         plugins=tuple(p.lower().replace("-", "_") for p in plugins),
+        auth_mode=auth_mode,
+        token_header=token_header,
     )
+
+
+def _validate_auth(auth_mode: str, token: str, token_header: str) -> None:
+    """Reject auth configurations that are ambiguous or unsafe."""
+    if auth_mode not in _AUTH_MODES:
+        raise ValueError(
+            f"NAUTOBOT_MCP_AUTH_MODE must be one of {sorted(_AUTH_MODES)}, "
+            f"got {auth_mode!r}."
+        )
+
+    if auth_mode == AUTH_MODE_STATIC:
+        if not token:
+            raise ValueError(
+                "Nautobot API token is not configured. Set the NAUTOBOT_TOKEN env "
+                "var or PLUGINS_CONFIG['nautobot_mcp']['nautobot_token']."
+            )
+        return
+
+    # Header mode. A shared token alongside it would be a silent fallback that
+    # attributes other people's changes to its owner, so refuse to start.
+    if token:
+        raise ValueError(
+            "NAUTOBOT_TOKEN must not be set when NAUTOBOT_MCP_AUTH_MODE=header; "
+            "every request supplies its own token."
+        )
+    if not _HEADER_NAME_RE.fullmatch(token_header):
+        raise ValueError(
+            f"NAUTOBOT_MCP_TOKEN_HEADER {token_header!r} is not a valid HTTP header name."
+        )
+    # The Authorization header normally carries the gateway's own credential;
+    # forwarding it to Nautobot would be token passthrough.
+    if token_header.lower() == "authorization":
+        raise ValueError(
+            "NAUTOBOT_MCP_TOKEN_HEADER must not be 'Authorization'; use a "
+            f"dedicated header such as {DEFAULT_TOKEN_HEADER!r}."
+        )
 
 
 def _django_key(key: str) -> str:

@@ -26,7 +26,7 @@ from . import __version__
 from .client import NautobotClient
 from .config import NautobotMcpSettings, load_settings
 from .logging_config import configure_logging
-from .runtime import set_client, set_settings
+from .runtime import get_settings, set_client, set_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -96,7 +96,15 @@ def build_server(settings: NautobotMcpSettings | None = None) -> MCPServer:
             await client.aclose()
             logger.info("Nautobot MCP server shut down cleanly")
 
-    mcp = MCPServer(
+    server_cls: Any = MCPServer
+    server_kwargs: dict[str, Any] = {}
+    if resolved.per_request_token:
+        from .request_auth import PerRequestTokenServer
+
+        server_cls = PerRequestTokenServer
+        server_kwargs["token_header"] = resolved.token_header
+
+    mcp = server_cls(
         "nautobot-mcp",
         instructions=(
             "Tools for interacting with a Nautobot instance via its built-in "
@@ -108,6 +116,7 @@ def build_server(settings: NautobotMcpSettings | None = None) -> MCPServer:
         ),
         version=__version__,
         lifespan=lifespan,
+        **server_kwargs,
     )
 
     register_all(mcp)
@@ -128,6 +137,14 @@ async def _async_main(
         sys.exit(2)
 
     if transport == "stdio":
+        if get_settings().per_request_token:
+            message = (
+                "NAUTOBOT_MCP_AUTH_MODE=header needs an HTTP transport "
+                "(--transport streamable-http); stdio carries no request headers."
+            )
+            logger.error("Configuration error: %s", message)
+            print(f"Error: {message}", file=sys.stderr, flush=True)
+            sys.exit(2)
         await mcp.run_stdio_async()
         return
 

@@ -41,12 +41,7 @@ async def run_job_by_name_or_id(
     payload: dict[str, Any] = {"data": data or {}, "commit": commit}
     if schedule:
         payload["schedule"] = schedule
-    cli = client()
-    resp = await cli._client.post(
-        f"/api/extras/jobs/{job['id']}/run/", json=payload
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return await client().run_job(job["id"], payload)
 
 
 async def plugin_rest_list(

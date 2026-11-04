@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import Any
 
 import httpx
@@ -44,28 +45,61 @@ _READ_POST_ENDPOINTS: frozenset[str] = frozenset(
 class NautobotClient:
     """Async wrapper around Nautobot's REST and GraphQL APIs."""
 
-    def __init__(self, settings: NautobotMcpSettings) -> None:
+    def __init__(
+        self,
+        settings: NautobotMcpSettings,
+        *,
+        token: str | None = None,
+        http: httpx.AsyncClient | None = None,
+    ) -> None:
+        """Create a client.
+
+        Args:
+            settings: Resolved server settings.
+            token: Nautobot API token to authenticate with. Defaults to
+                ``settings.token`` (static mode).
+            http: Existing connection pool to share. Used by
+                :meth:`for_token`; a client that did not create its pool
+                does not close it.
+        """
         self.settings = settings
         self.base_url = settings.url
-        self._client = httpx.AsyncClient(
+        token = settings.token if token is None else token
+        # Sent per request rather than as a pool default so that clients for
+        # different users can safely share one connection pool.
+        self._auth_headers = {"Authorization": f"Token {token}"} if token else {}
+        self._owns_http = http is None
+        self._client = http or httpx.AsyncClient(
             base_url=settings.url,
             headers={
-                "Authorization": f"Token {settings.token}",
                 "Accept": "application/json",
                 "User-Agent": "nautobot-mcp",
             },
             verify=settings.verify_ssl,
             timeout=settings.request_timeout,
             follow_redirects=True,
+            # The pool is shared by every user, so it must never keep cookies:
+            # a stored session cookie would authenticate the next user's
+            # request as whoever received it.
+            cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
         )
         self.tenant_scope = TenantScope(
             settings.tenant_scope, settings.tenant_group_scope
         )
 
+    def for_token(self, token: str) -> NautobotClient:
+        """Return a client that authenticates as ``token`` on this connection pool.
+
+        Each call gets fresh tenant-scope state, so tenant names are resolved
+        with the caller's own permissions.
+        """
+        return NautobotClient(self.settings, token=token, http=self._client)
+
     # ---- lifecycle -----------------------------------------------------
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_http:
+            await self._client.aclose()
 
     async def __aenter__(self) -> NautobotClient:
         return self
@@ -98,6 +132,27 @@ class NautobotClient:
                 f"Refusing {method} {endpoint}: writes are disabled. "
                 "Set NAUTOBOT_MCP_ALLOW_WRITES=true (or allow_writes=true in "
                 "PLUGINS_CONFIG) to enable mutating operations."
+            )
+
+    def _on_base_origin(self, url: str | None) -> str | None:
+        """Rebuild a Nautobot pagination link on the configured Nautobot URL.
+
+        Behind a TLS-terminating proxy Nautobot often returns ``http://`` (or
+        internal-host) ``next`` links. Keeping only their path and query keeps
+        pagination working without sending the token anywhere else.
+        """
+        if not url:
+            return None
+        link = httpx.URL(url)
+        return str(httpx.URL(self.base_url).copy_with(path=link.path, query=link.query))
+
+    def _assert_same_origin(self, url: str) -> None:
+        target, base = httpx.URL(url), httpx.URL(self.base_url)
+        if (target.scheme, target.host, target.port) != (base.scheme, base.host, base.port):
+            raise PermissionError(
+                f"Refusing to follow a link to {target.scheme}://{target.host}: it is not "
+                "the configured Nautobot URL. Check Nautobot's proxy/forwarded-host "
+                "settings if its pagination links point elsewhere."
             )
 
     # ---- tenant scoping ------------------------------------------------
@@ -227,19 +282,30 @@ class NautobotClient:
         params: dict[str, Any] | None = None,
         json: Any = None,
         max_retries: int = 3,
+        write_gated: bool = True,
     ) -> httpx.Response:
         method = method.upper()
 
-        # Validate endpoint shape only for relative paths; absolute URLs
-        # (used to follow Nautobot's pagination ``next`` links) are
-        # already-trusted, since they come from prior responses.
-        if not url.startswith("http"):
+        # Never send an unauthenticated request: in per-request token mode the
+        # shared pool has no credential, and Nautobot may allow anonymous reads.
+        if not self._auth_headers:
+            raise PermissionError("No Nautobot API token is available for this request.")
+
+        if url.startswith("http"):
+            # Absolute URLs come from Nautobot's pagination ``next`` links.
+            # Only follow them to Nautobot itself, so a misconfigured proxy
+            # cannot send the caller's token to another host or over http.
+            self._assert_same_origin(url)
+        elif write_gated:
             self._check_write_allowed(method, url)
 
         last_exc: Exception | None = None
         for attempt in range(1, max_retries + 1):
             try:
-                request_kwargs: dict[str, Any] = {"params": params}
+                request_kwargs: dict[str, Any] = {
+                    "params": params,
+                    "headers": self._auth_headers,
+                }
                 if json is not None:
                     request_kwargs["json"] = json
                 response = await self._client.request(method, url, **request_kwargs)
@@ -350,7 +416,7 @@ class NautobotClient:
 
             if isinstance(data, dict) and "results" in data:
                 results.extend(data.get("results") or [])
-                next_url = data.get("next")
+                next_url = self._on_base_origin(data.get("next"))
             elif isinstance(data, list):
                 results.extend(data)
                 break
@@ -391,6 +457,24 @@ class NautobotClient:
             await self.rest_get_object(ep, object_id)  # raises if out of scope
         await self._request("DELETE", f"{ep}{object_id}/")
         return {"deleted": True, "endpoint": ep, "id": object_id}
+
+    # ---- jobs ----------------------------------------------------------
+
+    async def run_job(self, job_id: str, payload: dict[str, Any]) -> Any:
+        """Start a Nautobot job: ``POST /api/extras/jobs/<id>/run/``.
+
+        Job runs are gated by Nautobot's own per-job permissions rather than
+        the MCP write gate. They are not retried: a retry after a timeout or
+        5xx could start the same job twice.
+        """
+        resp = await self._request(
+            "POST",
+            f"/api/extras/jobs/{job_id}/run/",
+            json=payload,
+            max_retries=1,
+            write_gated=False,
+        )
+        return resp.json()
 
     # ---- GraphQL -------------------------------------------------------
 

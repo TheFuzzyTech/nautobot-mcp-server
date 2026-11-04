@@ -1,0 +1,66 @@
+# Obot MCP catalog entry: one shared nautobot-mcp deployment, with each user
+# connecting through their own Nautobot API token.
+#
+# Add this file to the Git repository Obot syncs its MCP catalog from.
+# Obot authenticates users with your identity provider. Each user enters their
+# personal Nautobot token once when they connect, and Obot sends it in the
+# X-Nautobot-Token header on that user's requests only.
+name: Nautobot
+entryKey: nautobot
+serverUserType: multiUser
+shortDescription: Query and manage Nautobot as yourself, with your own Nautobot API token
+description: |
+  Read and (where your Nautobot permissions allow) change devices, locations,
+  IPAM, circuits, VMs and jobs in Nautobot.
+
+  Every request runs as **you**: Nautobot applies your object permissions and
+  records changes in the changelog under your name.
+
+  ## What you'll need to connect
+
+  - **Nautobot API token**: create one in Nautobot under your user profile,
+    then *API Tokens*. Leave *Write enabled* off unless you need to make
+    changes, and set an expiry date.
+metadata:
+  categories: Networking
+repoURL: https://github.com/bsmeding/nautobot-mcp-server
+
+# Deployment-level settings, set once by the admin who deploys the server.
+env:
+  - key: NAUTOBOT_URL
+    name: Nautobot URL
+    description: Base URL of the Nautobot instance, e.g. https://nautobot.example.org
+    required: true
+    sensitive: false
+  - key: NAUTOBOT_MCP_ALLOW_WRITES
+    name: Enable write tools
+    description: >-
+      "true" allows the create/update/delete tools. Users can still only write if
+      their own token is write-enabled and Nautobot permits it.
+    required: false
+    sensitive: false
+  - key: NAUTOBOT_MCP_CA_BUNDLE
+    name: CA bundle path
+    description: Path to a CA bundle inside the container, if Nautobot uses a private CA
+    required: false
+    sensitive: false
+
+runtime: containerized
+containerizedConfig:
+  image: ghcr.io/YOUR-ORG/nautobot-mcp:0.2.5-peruser1
+  port: 8000
+  path: /mcp
+  args:
+    - nautobot-mcp
+    - --transport
+    - streamable-http
+
+# Per-user value, stored on each user's instance and sent only with that
+# user's requests.
+multiUserConfig:
+  userDefinedHeaders:
+    - key: X-Nautobot-Token
+      name: Nautobot API token
+      description: Your personal token from Nautobot (profile, then API Tokens)
+      required: true
+      sensitive: true

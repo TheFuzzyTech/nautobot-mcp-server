@@ -114,7 +114,7 @@ All configuration knobs:
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `NAUTOBOT_URL` | — (required) | Nautobot base URL. |
-| `NAUTOBOT_TOKEN` | — (required) | Nautobot API token. |
+| `NAUTOBOT_TOKEN` | — (required in `static` mode) | Nautobot API token. Must be unset in `header` mode. |
 | `NAUTOBOT_MCP_VERIFY_SSL` | `true` | `false` disables TLS verification. |
 | `NAUTOBOT_MCP_CA_BUNDLE` | — | Path to a CA bundle (private CA setups). |
 | `NAUTOBOT_MCP_TIMEOUT` | `30` | HTTP timeout in seconds. |
@@ -126,6 +126,8 @@ All configuration knobs:
 | `NAUTOBOT_MCP_LOG_LEVEL` | `INFO` | Log level (logs go to stderr). |
 | `NAUTOBOT_MCP_HOST` | `127.0.0.1` | Bind address for `streamable-http` and `sse`. |
 | `NAUTOBOT_MCP_PORT` | `8000` | Bind port for `streamable-http` and `sse`. |
+| `NAUTOBOT_MCP_AUTH_MODE` | `static` | `header` takes each caller's own token from a request header (see [Multi-user](#multi-user-per-request-tokens)). |
+| `NAUTOBOT_MCP_TOKEN_HEADER` | `X-Nautobot-Token` | Header carrying the caller's token in `header` mode. |
 
 Connection credentials stay as `NAUTOBOT_URL` / `NAUTOBOT_TOKEN`. MCP-specific
 knobs use the `NAUTOBOT_MCP_` prefix. Legacy unprefixed names
@@ -167,6 +169,45 @@ nautobot-mcp --transport sse
 ```
 
 Streamable HTTP is served at `/mcp`. SSE is served at `/sse`.
+
+## Multi-user: per-request tokens
+
+By default the server uses one shared token, so every change made through it
+is attributed to that token's owner. To let several people share one
+deployment while Nautobot still sees, permits and audits each of them
+individually, run it behind an MCP gateway (such as
+[Obot](https://obot.ai)) that signs users in and adds each user's personal
+Nautobot token to their requests:
+
+```bash
+export NAUTOBOT_URL="https://nautobot.example.com"
+export NAUTOBOT_MCP_AUTH_MODE=header          # NAUTOBOT_TOKEN must NOT be set
+nautobot-mcp --transport streamable-http --host 0.0.0.0
+```
+
+Each MCP request must then carry `X-Nautobot-Token: <token>` (or
+`X-Nautobot-Token: Token <token>`). Behaviour:
+
+- **No fallback.** A request without the header fails; it never runs under
+  another identity. Starting with both `NAUTOBOT_TOKEN` and `header` mode set
+  is a configuration error.
+- **HTTP transports only.** stdio has no request headers, so `header` mode
+  refuses to start on stdio.
+- **No passthrough of gateway credentials.** The token header cannot be
+  `Authorization`, which normally carries the gateway's own token.
+- **Tokens only go to Nautobot.** Pagination links are rebuilt on
+  `NAUTOBOT_URL` (fixing `http://` links behind a TLS proxy), and the shared
+  connection pool never stores cookies, so one user's session can't leak to
+  another.
+- `NAUTOBOT_MCP_ALLOW_WRITES` still gates the write tools for everyone; on top
+  of that, read-only Nautobot tokens and object permissions limit each user.
+
+The header is treated as "the token to call Nautobot with", never as proof of
+identity: Nautobot validates it. Keep the server reachable only from the
+gateway anyway (for example with a Kubernetes NetworkPolicy).
+
+`deploy/Dockerfile` builds an image preconfigured for this mode, and
+`deploy/obot/nautobot.yaml` is a matching Obot catalog entry.
 
 ## Read-only by default
 

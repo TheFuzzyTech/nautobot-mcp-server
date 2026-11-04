@@ -59,13 +59,9 @@ def register(mcp: MCPServer) -> None:
         payload: dict[str, Any] = {"data": data or {}, "commit": commit}
         if schedule:
             payload["schedule"] = schedule
-        # Job execution is a legitimate POST that is gated by Nautobot's
-        # own per-job permissions, so we route it through the underlying
-        # httpx client instead of the write-gated _request().
-        cli = client()
-        resp = await cli._client.post(f"/api/extras/jobs/{job['id']}/run/", json=payload)
-        resp.raise_for_status()
-        return resp.json()
+        # Job execution is gated by Nautobot's own per-job permissions, so
+        # run_job() bypasses the MCP write gate (but still authenticates).
+        return await client().run_job(job["id"], payload)
 
     @mcp.tool()
     async def get_job_result(result_id: str) -> dict[str, Any]:
